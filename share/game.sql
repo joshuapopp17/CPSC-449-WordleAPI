@@ -16,6 +16,11 @@ CREATE TABLE game(
     gstate VARCHAR(12)
 );
 
+CREATE TABLE callbacks(
+    callbackId INTEGER PRIMARY KEY AUTOINCREMENT,
+    callbackUrl TEXT
+);
+
 CREATE TABLE guess(
     guessid INTEGER PRIMARY KEY AUTOINCREMENT,
     gameid TEXT,
