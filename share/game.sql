@@ -29,6 +29,12 @@ CREATE TABLE answer(
     answord VARCHAR(5)
 );
 
+CREATE TABLE callbacks(
+    client TEXT NOT NULL,
+    callbackUrl TEXT NOT NULL,
+    UNIQUE(client)
+);
+
 CREATE TABLE valid_word(
     valid_id INTEGER PRIMARY KEY AUTOINCREMENT,
     valword VARCHAR(5)

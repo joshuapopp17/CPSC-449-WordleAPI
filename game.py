@@ -4,9 +4,15 @@ import uuid
 import databases
 import toml
 import itertools
+import httpx
+import requests
 from quart import Quart, abort, g, request
 from quart_schema import QuartSchema, validate_request
-
+from redis import Redis
+from rq import Queue, Worker
+from rq.registry import FailedJobRegistry
+from rq.job import Job
+from redis_client import user_data,scores
 app = Quart(__name__)
 QuartSchema(app)
 
@@ -17,6 +23,10 @@ app.config.from_file(f"./etc/{__name__}.toml", toml.load)
 class Game:
     username: str
 
+@dataclasses.dataclass
+class Callback:
+    callbackUrl: str
+    client: str
 
 @dataclasses.dataclass
 class Guess:
@@ -46,6 +56,31 @@ def _get_db_primary():
         g.sqlite_db_primary = _connect_db_primary()
     return g.sqlite_db_primary
 
+#################################################
+###### Forwarding Data To Leaderboard ###########
+def send_data_to_redis_client(packet, callbackUrl):
+    print(packet,callbackUrl)
+    try:
+        req = httpx.post(callbackUrl, json = packet)
+        # req_test = httpx.get("http://127.0.0.1:5400/leaderboard")
+        print(req.status_code)
+    except httpx.RequestError:
+        return "Error", req.status_code
+
+#################################################
+############# WORKER FUCTION ####################
+def workerQueue(username, result, guesses, callbackUrl):
+    redis = Redis()
+    queue = Queue(connection=Redis())
+    registry = FailedJobRegistry(queue=queue)
+    packet = {"guesses": guesses,'result': result,'username':username}
+    result = queue.enqueue(send_data_to_redis_client, packet, callbackUrl)
+    for failed_job in registry.get_job_ids():
+        f = Job.fetch(failed_job, connection=redis)
+        print(f)
+
+#################################################
+#################################################
 
 @app.teardown_appcontext
 async def close_connection(exception):
@@ -133,6 +168,24 @@ async def add_guess(data):
             except sqlite3.IntegrityError as e:
                 abort(404, e)
 
+            # send data to LeaderBoard
+            callbackUrl = await db.fetch_one(
+                "SELECT callbackUrl FROM callbacks WHERE client = :client",
+                values={"client": 'leaderboard'},
+            )
+
+            guessNum = await db.fetch_one(
+                "SELECT guesses from game where gameid = :gameid",
+                values={"gameid": currGame["gameid"]},
+            )
+
+            # packet = {"guesses": guessNum[0], "result": "win", "username": auth.username}
+            # response = httpx.post(callbackUrl[0], json=packet) 
+            # if callbackUrl is None:
+            #     workerQueue(auth.username,"loss", guessNum[0],callbackUrl[0])
+            
+            workerQueue(auth.username,"win", guessNum[0],"http://127.0.0.1:5400/results")
+
             return {
                 "guessedWord": currGame["word"],
                 "Accuracy": "\u2713" * 5,
@@ -201,7 +254,22 @@ async def add_guess(data):
 
                 # if after updating game number of guesses reaches max guesses then mark game as finished
                 if guessNum[0] + 1 >= 6:
+
                     # update game status as finished
+                    callbackUrl = await db.fetch_one(
+                        "SELECT callbackUrl FROM callbacks WHERE client = :client",
+                        values={"client": 'leaderboard'},
+                    )
+
+
+                    # packet = {"guesses": guessNum[0], "result": "loss", "username": auth.username}
+                    # response = httpx.post(callbackUrl[0], json=packet)
+                    # if callbackUrl is None:
+                    #     workerQueue(auth.username,"loss", guessNum[0],callbackUrl[0])
+                    
+                    workerQueue(auth.username,"win", guessNum[0],"http://127.0.0.1:5400/results")
+                    
+
                     await db_primary.execute(
                         """
                         UPDATE game set gstate = :status where gameid = :gameid
@@ -275,6 +343,39 @@ async def my_game():
             401,
             {"WWW-Authenticate": 'Basic realm = "Login required"'},
         )
+
+@app.route("/webhook", methods=["POST"])
+@validate_request(Callback)
+async def web_hook(data):
+    webhookData = dataclasses.asdict(data)
+    client = webhookData.get('client')
+    callbackUrl = webhookData.get('callbackUrl')
+    db = await _get_db()
+    db_primary = await _get_db_primary()
+
+    # check db if client is already registered
+    check = await db.fetch_all(
+    "SELECT * FROM callbacks WHERE client=:client",
+    values={"client": client},
+    )
+
+    # if not registered add the client and callbackUrl to the DB
+    if len(check) == 0:
+        print("Registering")
+        await db_primary.execute(
+            "INSERT INTO callbacks(callbackUrl, client) VALUES(:callbackUrl, :client)",
+            values={"callbackUrl": callbackUrl, "client": client},
+            )
+        return {
+            "Success": "Client registered",
+        }, 201  # should return correct answer?
+    else:
+        print("Already Registered")
+        return {
+            "Success": "Client already exists",
+        }, 201  # should return correct answer?
+
+
 
 
 @app.errorhandler(409)
